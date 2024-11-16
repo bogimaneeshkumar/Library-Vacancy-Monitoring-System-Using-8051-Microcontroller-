@@ -1,63 +1,140 @@
 ORG 000H
-SJMP INIT
+SJMP INIT           ; Jump to initialization
 ORG 003H
-ACALL ISR
+ACALL INT0_ISR      ; Entry interrupt handler (INT0)
+RETI
+ORG 013H
+ACALL INT1_ISR      ; Exit interrupt handler (INT1)
 RETI
 
-INIT: MOV P0,#00000000B
-      MOV P3,#11111111B
-      MOV P1,#00000000B
-      MOV R6,#00000000B
-      MOV DPTR,#LUT
-      SETB IP.0     
-      SETB TCON.0   
-      SETB IE.0     
-      SETB IE.7    
+; ---- Initialization ----
+INIT:
+    MOV P0, #00H         ; Clear Port 0 (7-segment data)
+    MOV P1, #FFH         ; Clear Port 1 (multiplexing control)
+    CLR P3.2             ; INT0 initially disabled
+    CLR P3.3             ; INT1 initially disabled
+    MOV DPTR, #LUT       ; Set DPTR to LUT
+    MOV R6, #00H         ; Initialize count
+    MOV R7, #999D        ; Total capacity = 999
+    MOV R4, #00H         ; Clear INT0 flag
+    MOV R5, #00H         ; Clear INT1 flag
+    SETB TCON.0          ; Enable edge-triggered INT0
+    SETB TCON.2          ; Enable edge-triggered INT1
+    SETB IE.0            ; Enable INT0
+    SETB IE.1            ; Enable INT1
+    SETB IE.7            ; Enable global interrupt
+    SJMP MAIN            ; Jump to main loop
 
-MAIN: MOV A,R6
+; ---- Main Program ----
+MAIN:
+    ; Display vacancies using 3 multiplexed 7-segment LEDs
+    MOV A, R7            ; Total capacity
+    SUBB A, R6           ; Calculate vacancies (total - occupied)
+    MOV B, #100D
+    DIV AB               ; Get hundreds place
+    SETB P1.2            ; Turn off Ones place
+    CLR P1.0             ; Activate hundreds digit
+    ACALL DISPLAY        ; Show hundreds digit
+    ACALL DELAY
 
-MOV B,#100D
-      DIV AB
-      ACALL DISPLAY
-      SETB P1.0
-      ACALL DELAY
-      ACALL DELAY
-      MOV A,B
-      MOV B,#10D
-      DIV AB
-      ACALL DISPLAY
-      CLR P1.0
-      SETB P1.1
-      ACALL DELAY
-      ACALL DELAY
-      MOV A,B
-      ACALL DISPLAY
-      CLR P1.1
-      SETB P1.2
-      ACALL DELAY
-      ACALL DELAY
-      CLR P1.2
-      SJMP MAIN
+    MOV A, B             ; Move remainder to A
+    MOV B, #10D
+    DIV AB               ; Get tens place
+    SETB P1.0            ; Turn off the hundreds place
+    CLR P1.1             ; Activate tens digit
+    ACALL DISPLAY        ; Show tens digit
+    ACALL DELAY
 
-ISR: INC R6     
-     RET
+    MOV A, B             ; Ones place remains in A
+    SETB P1.1            ; Turn off the tens place
+    CLR P1.2             ; Activate ones digit
+    ACALL DISPLAY        ; Show ones digit
+    ACALL DELAY
 
-DISPLAY: MOVC A,@A+DPTR 
-         CPL A
-         MOV P0,A
-         RET
+    SJMP MAIN            ; Repeat
 
-DELAY: MOV R3,#255D  
-LABEL: DJNZ R3,LABEL
-       RET
-LUT: DB 3FH
-     DB 06H
-     DB 5BH
-     DB 4FH
-     DB 66H
-     DB 6DH
-     DB 7DH
-     DB 07H
-     DB 7FH
-     DB 6FH
+; ---- INT0 Handler (Potential Entry) ----
+INT0_ISR:
+    JB R5, CONFIRM_EXIT       ; If INT1 flag set, confirm exit
+    SETB R4                   ; Otherwise, set INT0 flag
+    ACALL WAIT_FOR_INT1       ; Wait for INT1 to confirm entry
+    MOV R4, #00H              ; Clear INT0 flag
+    RET
+
+; ---- INT1 Handler (Potential Exit) ----
+INT1_ISR:
+    JB R4, CONFIRM_ENTRY       ; If INT0 flag set, confirm entry
+    SETB R5                    ; Otherwise, set INT1 flag
+    ACALL WAIT_FOR_INT0        ; Wait for INT0 to confirm exit
+    MOV R5, #00H               ; Clear INT1 flag
+    RET
+
+; ---- Confirm Entry ----
+CONFIRM_ENTRY:
+    INC R6                   ; Increment count
+    MOV A, R6
+    CJNE A, R7, VALID_ENTRY
+    DEC R6                   ; Revert if count exceeds capacity
+VALID_ENTRY:
+    MOV R4, #00H             ; Clear both flags
+    MOV R5, #00H
+    RET
+
+; ---- Confirm Exit ----
+CONFIRM_EXIT:
+    CJNE R6, #00H, VALID_EXIT ; Check if count is not zero
+    RET                      ; Return if already zero
+VALID_EXIT:
+    DEC R6                   ; Decrement count
+    MOV R4, #00H             ; Clear both flags
+    MOV R5, #00H
+    RET
+
+; ---- Wait for INT1 (for entry confirmation) ----
+WAIT_FOR_INT1:
+    MOV R3, #255D            ; Timeout value
+WAIT1_LOOP:
+    JNB P3.3, WAIT1_DONE     ; Check if INT1 is triggered
+    DJNZ R3, WAIT1_LOOP
+    MOV R4, #00H             ; Timeout, no confirmation; no entry marked
+WAIT1_DONE:
+    RET
+
+; ---- Wait for INT0 (for exit confirmation) ----
+WAIT_FOR_INT0:
+    MOV R3, #255D            ; Timeout value
+WAIT0_LOOP:
+    JNB P3.2, WAIT0_DONE     ; Check if INT0 is triggered
+    DJNZ R3, WAIT0_LOOP
+    MOV R5, #00H             ; Timeout, no confirmation; no exit marked
+WAIT0_DONE:
+    RET
+
+; ---- Display Routine ----
+DISPLAY:
+    MOVC A, @A+DPTR          ; Get 7-segment data from LUT
+    CPL A                    ; Active-low output
+    MOV P0, A                ; Output to Port 0
+    RET
+
+; ---- Delay Routine ----
+DELAY:
+    MOV R3, #255D
+LABEL:
+    DJNZ R3, LABEL
+    RET
+
+; ---- Look-Up Table (LUT) ----
+LUT:
+    DB 3FH                   ; '0'
+    DB 06H                   ; '1'
+    DB 5BH                   ; '2'
+    DB 4FH                   ; '3'
+    DB 66H                   ; '4'
+    DB 6DH                   ; '5'
+    DB 7DH                   ; '6'
+    DB 07H                   ; '7'
+    DB 7FH                   ; '8'
+    DB 6FH                   ; '9'
+
 END
